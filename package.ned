@@ -14,27 +14,9 @@ import inet.environment.contract.IObjectCache;
 //
 // TODO documentation
 //
-network LoRaWANNetwork
-{
-    parameters:
-        int numberOfNodes = default(10);
-        int numberOfGateways = default(3);
-        int networkSizeX = default(10000);
-        int networkSizeY = default(10000);
-        @display("bgb=networkSizeX,networkSizeY");
-
+network LoRaWANNetwork {
     submodules:
-        loRaNodes[numberOfNodes]: LoRaNode {
-            @display("p=309,412");
-        }
-        loRaGW[numberOfGateways]: LoRaGW {
-            @display("p=157,238");
-        }
-        LoRaMedium: LoRaMedium {
-            @display("p=9800,26");
-        }
-    
-    connections:
-      
+       // loraWAN: LoRaWANNetwork;
+        node[1]: LoRaNode;
+        gateway[1]: LoRaGW;
 }
-

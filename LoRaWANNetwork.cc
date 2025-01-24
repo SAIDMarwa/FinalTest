@@ -1,26 +1,37 @@
 #include <iostream>
+#include <fstream>
 #include <vector>
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
 #include <algorithm>
-#include <fstream>
+#include <cstdlib> // Pour rand()
+#include <ctime>   // Pour srand()
+#include <numeric> // Pour std::accumulate
+#include <sstream>
+#include <string>
+#include <limits>
+#include <omnetpp.h>
+int clusterCount = 20;  // Nombre de clusters ou de passerelles à placer
+const int terrainWidth = 1000;  // Largeur du terrain en mètres
+const int terrainHeight = 1000;  // Hauteur du terrain en mètres
+const int N = 300;  // Nombre total de nœuds
+const double D_min = 10.0;  // Distance minimale entre deux nœuds en mètres
+const double E_total = 1000.0;  // Énergie totale admissible (par exemple en mAh)
+const double S_terrain = terrainWidth * terrainHeight;  // Surface totale du terrain (en m²)
+const int capacity = 20;  // Capacité d'une passerelle en nombre de nœuds gérés
+const double energy = 15.0;  // Consommation d'énergie d'une passerelle (en watts)
+const int rayon = 200;  // Rayon de couverture des gateways (en mètres)
 
-const int terrainWidth = 1000;  // Largeur du terrain (en mètres)
-const int terrainHeight = 1000; // Hauteur du terrain (en mètres)
-const int numNodes = 100; // Nombre de nœuds
-const double rayonN = 50.0; // Rayon de couverture des capteurs (en mètres)
-const double minDistance = 10.0; // Distance minimale entre deux nœuds (en mètres)
-const int J = 10000; // Nombre de points à couvrir sur le terrain
-const int numGateways = 10;  // Nombre de passerelles
-const int capacity = 20;  // Capacité d'une passerelle (en nombre de nœuds gérés)
-const double energy = 10.0; // Consommation d'énergie d'une passerelle (en watts)
-const double E_total = 1000.0; // Consommation d'énergie totale admissible (en watts)
-const double terrainArea = terrainWidth * terrainHeight;  // Surface totale du terrain (en m²)
-double D_nn[numNodes][numNodes];
-#define MAX_ITERATIONS 500
-const int rayon =150; // rayon de couverture des gateways (en mètres)
-const double TOLERANCE = 1e-6;
+
+// Définition des variables de décision
+std::vector<int> X(clusterCount, 0);  // X_r : 1 si une passerelle est placée à l'emplacement r, sinon 0
+std::vector<std::vector<int>> Y(clusterCount, std::vector<int>(N, 0));  // Y_rn : 1 si la passerelle r sert le nœud n, sinon 0
+std::vector<int> Z(N, 0);  // Z_n : 1 si le nœud est activé, sinon 0
+std::vector<int> C_r(clusterCount, 20);  // Exemple : chaque passerelle a une capacité de 20 nœuds
+std::vector<double> E_r(clusterCount, 15.0);  // Consommation d'énergie des passerelles (en watts)
+std::vector<double> S_n(N, 60.0);  // Chaque nœud couvre 60.0 m²
+
 // Structure pour représenter un nœud
 struct Node {
     double x, y; // Coordonnées du nœud
@@ -34,6 +45,7 @@ struct Gateway {
     double capacity; // Capacité de la passerelle C_r
     double energy;   // Énergie consommée E_r
     double rayon;  //rayon de couverture R_c
+    std::vector<int> assignedNodes; // Nœuds assignés à cette passerelle
 };
 
 // Structure pour représenter un obstacle
@@ -41,417 +53,580 @@ struct Obstacle {
     double x, y, height; // Coordonnées et hauteur de l'obstacle
 };
 
-// Fonction pour calculer la distance entre un nœud et une passerelle
-double distance(double x1, double y1, double x2, double y2) {
-    return sqrt(pow(x2 - x1, 2) + pow(y2 - y1, 2));
+// Calcul de distance entre deux points
+double calculateDistance(const Node& a, const Node& b) {
+    return sqrt(pow(a.x - b.x, 2) + pow(a.y - b.y, 2));
 }
 
-// Fonction pour vérifier si une passerelle est bloquée par un obstacle
-bool isGatewayBlockedByObstacle(const Gateway& gateway, const std::vector<Obstacle>& obstacles) {
-    for (const auto& obstacle : obstacles) {
-        // Vérification de la proximité d'un obstacle à la passerelle
-        double dist = sqrt(pow(gateway.x - obstacle.x, 2) + pow(gateway.y - obstacle.y, 2));
-        if (dist < rayon && obstacle.height > 0) { // Si l'obstacle est assez proche et a une hauteur
-            return true; // L'obstacle bloque la passerelle
+double calculateDistance1(double x1, double y1, double x2, double y2) {
+    return std::sqrt((x1 - x2) * (x1 - x2) + (y1 - y2) * (y1 - y2));
+}
+
+
+// Fonction f_N : Minimiser le nombre de nœuds activés
+double f_N(const std::vector<int>& Z) {
+    return std::accumulate(Z.begin(), Z.end(), 0);
+}
+
+// Fonction f_C : Maximiser la somme des distances entre les passerelles et les nœuds
+double f_C(const std::vector<std::vector<int>>& Y, const std::vector<std::vector<double>>& D_rn) {
+    double sum = 0.0;
+    for (int r = 0; r < clusterCount; ++r) { // Utiliser clusterCount au lieu de R
+        for (int n = 0; n < N; ++n) {
+            sum += Y[r][n] * D_rn[r][n];
         }
     }
-    return false; // Pas de blocage
+    return sum;
 }
 
-// Fonction pour charger les obstacles depuis un fichier texte
-void loadObstaclesFromFile(const char* filename, std::vector<Obstacle>& obstacles) {
-    std::ifstream file(filename);
-    if (!file.is_open()) {
-        std::cerr << "Erreur d'ouverture du fichier des obstacles." << std::endl;
-        return;
+// Fonction f_E : Minimiser l'énergie totale consommée par les passerelles
+double f_E(const std::vector<int>& X, const std::vector<double>& E_r) {
+    double sum = 0.0;
+    for (int r = 0; r < clusterCount; ++r) {
+        sum += X[r] * E_r[r];
     }
-
-    double x, y, height;
-    while (file >> x >> y >> height) {
-        obstacles.push_back({x, y, height});
-    }
-
-    file.close();
+    return sum;
 }
 
-// Fonction pour sauvegarder les obstacles dans un fichier texte
-void saveObstaclesToFile(const std::vector<Obstacle>& obstacles, const char* filename) {
+// Fonction globale f : Combinaison des fonctions f_N, f_C, et f_E
+double f(double alpha, double beta, double gamma, const std::vector<int>& Z, const std::vector<std::vector<int>>& Y, const std::vector<std::vector<double>>& D_rn, const std::vector<int>& X, const std::vector<double>& E_r) {
+    return alpha * f_N(Z) + beta * f_C(Y, D_rn) + gamma * f_E(X, E_r);
+}
+
+// Contrainte 1 : Chaque nœud doit être servi par au moins une passerelle
+bool constraint1(const std::vector<std::vector<int>>& Y) {
+    for (int n = 0; n < N; ++n) {
+        int sum = 0;
+        for (int r = 0; r < clusterCount; ++r) {
+            sum += Y[r][n];
+        }
+        if (sum < 1) return false;
+    }
+    return true;
+}
+
+// Contrainte 2 : Une passerelle ne peut servir un nœud que si elle est activée
+bool constraint2(const std::vector<std::vector<int>>& Y, const std::vector<int>& X) {
+    for (int r = 0; r < clusterCount; ++r) {
+        for (int n = 0; n < N; ++n) {
+            if (Y[r][n] > X[r]) return false;
+        }
+    }
+    return true;
+}
+
+// Contrainte 3 : La capacité de chaque passerelle ne doit pas être dépassée
+bool constraint3(const std::vector<std::vector<int>>& Y, const std::vector<int>& C_r) {
+    for (int r = 0; r < clusterCount; ++r) {
+        int sum = 0;
+        for (int n = 0; n < N; ++n) {
+            sum += Y[r][n];
+        }
+        if (sum > C_r[r]) return false;
+    }
+    return true;
+}
+
+// Contrainte 4 : L'énergie totale consommée ne doit pas dépasser E_total
+bool constraint4(const std::vector<int>& X, const std::vector<double>& E_r) {
+    double sum = 0.0;
+    for (int r = 0; r < clusterCount; ++r) {
+        sum += X[r] * E_r[r];
+    }
+    return sum <= E_total;
+}
+
+// Contrainte 5 : La surface couverte par les nœuds doit être au moins égale à S_terrain
+bool constraint5(const std::vector<int>& Z, const std::vector<double>& S_n) {
+    double sum = 0.0;
+    for (int n = 0; n < N; ++n) {
+        sum += Z[n] * S_n[n];
+    }
+    return sum >= S_terrain;
+}
+
+// Contrainte 6 : La distance minimale entre deux nœuds doit être respectée
+bool constraint6(const std::vector<Node>& nodes, double D_min) {
+    for (int m = 0; m < N; ++m) {
+        for (int n = m + 1; n < N; ++n) {
+            double distance = calculateDistance(nodes[m], nodes[n]);
+            if (distance < D_min) return false;
+        }
+    }
+    return true;
+}
+
+// Fonction pour générer des nœuds aléatoires
+std::vector<Node> generateNodes(int nodeCount, double width, double height) {
+    std::vector<Node> nodes;
+    srand(time(0));
+    for (int i = 0; i < nodeCount; ++i) {
+        nodes.push_back({static_cast<double>(rand() % int(width)), static_cast<double>(rand() % int(height))});
+    }
+    return nodes;
+}
+
+// Fonction pour écrire les nœuds dans un fichier
+void saveNodesToFile(const std::vector<Node>& nodes, const std::string& filename) {
     std::ofstream file(filename);
     if (!file.is_open()) {
-        std::cerr << "Erreur d'ouverture du fichier pour sauvegarder les obstacles." << std::endl;
+        std::cerr << "Error: Unable to open file " << filename << "\n";
         return;
     }
 
-    for (const auto& obstacle : obstacles) {
-        file << obstacle.x << " " << obstacle.y << " " << obstacle.height << std::endl;
-    }
-
-    file.close();
-}
-
-// Fonction pour assigner les noeuds aux passerelles les plus proches
-void assignNodesToGateways(const std::vector<Node> &nodes, const std::vector<Gateway> &gateways, int assignments[]) {
-    for (int i = 0; i < nodes.size(); ++i) {
-        double minDistance = distance(nodes[i].x, nodes[i].y, gateways[0].x, gateways[0].y);
-        int clusterIndex = 0;
-        for (int j = 1; j < gateways.size(); ++j) {
-            double dist = distance(nodes[i].x, nodes[i].y, gateways[j].x, gateways[j].y);
-            if (dist < minDistance) {
-                minDistance = dist;
-                clusterIndex = j;
-            }
-        }
-        assignments[i] = clusterIndex;
-    }
-}
-
-// Fonction pour mettre à jour les positions des passerelles
-void updateGateways(const std::vector<Node>& nodes, std::vector<Gateway>& gateways, int assignments[], int numNodes, int numGateways, const std::vector<Obstacle>& obstacles) {
-    for (int i = 0; i < numGateways; i++) {
-        double sumX = 0, sumY = 0;
-        int count = 0;
-
-        // Calculer le centre de chaque cluster
-        for (int j = 0; j < numNodes; j++) {
-            if (assignments[j] == i) {
-                sumX += nodes[j].x;
-                sumY += nodes[j].y;
-                count++;
-            }
-        }
-
-        if (count > 0) {
-            gateways[i].x = sumX / count;
-            gateways[i].y = sumY / count;
-        } else {
-            // Si aucun nœud n'est assigné à cette passerelle, réinitialiser à une position aléatoire
-            gateways[i].x = (rand() % 100);  // Valeur aléatoire, ajuster la plage selon votre environnement
-            gateways[i].y = (rand() % 100);
-        }
-
-        // Vérifier si la passerelle est bloquée par un obstacle
-        if (isGatewayBlockedByObstacle(gateways[i], obstacles)) {
-            std::cout << "La passerelle " << i << " est bloquée par un obstacle. Nouvelle position requise." << std::endl;
-            gateways[i].x = rand() % terrainWidth;  // Nouvelle position aléatoire
-            gateways[i].y = rand() % terrainHeight;
-        }
-        std::cerr << "Gateway " << i << gateways[i].x << ", " << gateways[i].y << ")" << std::endl;
-    }
-    std::cerr << "TESTGA" << std::endl;
-}
-
-
-// Fonction K-means
-void kMeans(const std::vector<Node> &nodes, std::vector<Gateway> &gateways, const std::vector<Obstacle> &obstacles) {
-    if (nodes.empty() || gateways.empty()) {
-        std::cerr << "Erreur : Nombre de noeuds ou de passerelles invalide." << std::endl;
-        return;
-    }
-    std::vector<int> assignments(nodes.size(), -1);
-    int iterations = 0;
-
-    std::cerr << "Début de kMeans" << std::endl;
-    while (iterations < MAX_ITERATIONS) {
-        assignNodesToGateways(nodes, gateways, assignments.data());
-        std::vector<Gateway> oldGateways = gateways;
-
-        // Mettre à jour les positions des passerelles
-        for (int i = 0; i < gateways.size(); ++i) {
-            double sumX = 0, sumY = 0;
-            int count = 0;
-            for (int j = 0; j < nodes.size(); ++j) {
-                if (assignments[j] == i) {
-                    sumX += nodes[j].x;
-                    sumY += nodes[j].y;
-                    ++count;
-                }
-            }
-            if (count > 0) {
-                gateways[i].x = sumX / count;
-                gateways[i].y = sumY / count;
-            } else {
-                gateways[i].x = rand() % terrainWidth;
-                gateways[i].y = rand() % terrainHeight;
-            }
-        }
-
-        // Vérifier les déplacements des passerelles
-        bool assignmentsChanged = false;
-        for (int i = 0; i < gateways.size(); ++i) {
-            double deltaX = std::abs(gateways[i].x - oldGateways[i].x);
-            double deltaY = std::abs(gateways[i].y - oldGateways[i].y);
-            if (deltaX > TOLERANCE || deltaY > TOLERANCE) {
-                assignmentsChanged = true;
-                std::cerr << "Passerelle " << i << " déplacée à (" << gateways[i].x << ", " << gateways[i].y << ")" << std::endl;
-            }
-        }
-
-        if (!assignmentsChanged) break;
-        ++iterations;
-    }
-
-    std::cerr << "Fin de kMeans après " << iterations << " itérations" << std::endl;
-}
-
-// Fonction pour calculer l'inertie
-double calculateInertia(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways, int assignments[], int numNodes, int numGateways) {
-    double inertia = 0.0;
-    for (int i = 0; i < numNodes; i++) {
-        double dist = pow(nodes[i].x - gateways[assignments[i]].x, 2) +
-                      pow(nodes[i].y - gateways[assignments[i]].y, 2);
-        inertia += dist;
-    }
-    return inertia;
-}
-
-// Fonction pour trouver le nombre optimal de clusters
-int findOptimalClusters(const std::vector<Node>& nodes, int numNodes,const std::vector<Obstacle>& obstacles) {
-    const int maxClusters = 10;  // Tester jusqu'à 10 clusters
-    double inertias[maxClusters];
-    int optimalK = 1;
-
-    std::cerr << "ht" << std::endl;
-    for (int k = 1; k <= maxClusters; k++) {
-        std::vector<Gateway> gateways(k);
-        int assignments[numNodes];
-        std::cerr << "ht1" << std::endl;
-        // Initialiser des passerelles aléatoires
-        for (int i = 0; i < k; i++) {
-            gateways[i].x = nodes[i % numNodes].x;
-            gateways[i].y = nodes[i % numNodes].y;
-            std::cerr <<  gateways[i].x << std::endl;
-        }
-
-        // Appliquer K-Means
-        kMeans(nodes, gateways, obstacles);
-
-
-        std::cerr << "ht2" << std::endl;
-        // Calculer l'inertie
-        assignNodesToGateways(nodes, gateways, assignments);
-        inertias[k - 1] = calculateInertia(nodes, gateways, assignments, numNodes, k);
-    }
-
-    // Trouver le coude
-    for (int i = 1; i < maxClusters - 1; i++) {
-        double decrease1 = inertias[i - 1] - inertias[i];
-        double decrease2 = inertias[i] - inertias[i + 1];
-        if (decrease1 > decrease2) {
-            optimalK = i;
-            break;
-        }
-    }
-
-    return optimalK;
-
-}
-
-
-
-// Fonction pour vérifier la distance minimale entre les nœuds
-bool checkMinDistance(const std::vector<Node>& nodes, double D_min) {
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        for (size_t j = i + 1; j < nodes.size(); ++j) {
-            double distance = std::sqrt(std::pow(nodes[i].x - nodes[j].x, 2) + std::pow(nodes[i].y - nodes[j].y, 2));
-            if (distance < D_min) {
-                return false;  // Si la distance entre deux nœuds est inférieure à D_min, retourner false
-            }
-        }
-    }
-    return true;
-}
-
-
-
-// Calculer la distance entre deux points
-double calculateDistance(double x1, double y1, double x2, double y2) {
-    return std::sqrt(std::pow(x2 - x1, 2) + std::pow(y2 - y1, 2));
-}
-
-// Fonction objective : f_N
-int calculateObjective_fN(const std::vector<Node>& nodes) {
-    int activeNodes = 0;
-    for (const auto& node : nodes) {
-        if (node.isActive) {
-            activeNodes++;
-        }
-    }
-    return activeNodes;
-}
-
-// Fonction objective : f_C
-double calculateObjective_fC(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways) {
-    double totalDistance = 0.0;
-    for (const auto& node : nodes) {
-        if (!node.isActive) continue;
-        double minDistance = 1e9; // Distance minimale pour un nœud à une passerelle
-        for (const auto& gateway : gateways) {
-            double distance = calculateDistance(node.x, node.y, gateway.x, gateway.y);
-            minDistance = std::min(minDistance, distance);
-        }
-        totalDistance += minDistance;
-    }
-    return totalDistance;
-}
-
-// Fonction objective : f_E
-double calculateObjective_fE(const std::vector<Gateway>& gateways) {
-    double totalEnergy = 0.0;
-    for (const auto& gateway : gateways) {
-        totalEnergy += gateway.energy;
-    }
-    return totalEnergy;
-}
-
-// Vérification des contraintes
-bool verifyConstraints(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways, double minDistance, double terrainArea) {
-    // Vérification de la distance minimale entre nœuds
-    for (size_t i = 0; i < nodes.size(); ++i) {
-        for (size_t j = i + 1; j < nodes.size(); ++j) {
-            if (calculateDistance(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y) < minDistance) {
-                std::cerr << "Distance minimale" <<minDistance<< std::endl;
-                std::cerr << "Distance" <<calculateDistance(nodes[i].x, nodes[i].y, nodes[j].x, nodes[j].y) << std::endl;
-                std::cerr << "Contrainte non respectée : distance minimale entre les nœuds." << std::endl;
-                return false;
-            }
-        }
-        // Calcul des distances entre les nœuds matrice des distances
-        /*  for (size_t i = 0; i < nodes.size(); ++i) {
-              for (size_t j = 0; j < nodes.size(); ++j) {
-                  D_nn[i][j] = sqrt(pow(nodes[i].x - nodes[j].x, 2) + pow(nodes[i].y - nodes[j].y, 2));
-                  if(D_nn[i][j]<minDistance){
-
-                  }
-              }
-          }
-        // Affichage de la matrice de distances
-           std::cout << "Matrice des distances :" << std::endl;
-           for (size_t i = 0; i < nodes.size(); ++i) {
-               for (size_t j = 0; j < nodes.size(); ++j) {
-                   std::cout << D_nn[i][j] << " ";
-               }
-               std::cout << std::endl;
-           }*/
-    }
-
-    // Vérification de la couverture du terrain
-    double coveredArea = 0.0;
-    for (const auto& node : nodes) {
-        if (node.isActive) {
-            coveredArea += M_PI * std::pow(rayonN, 2);
-        }
-    }
-    std::cerr << coveredArea << std::endl;
-    if (coveredArea < terrainArea) {
-        std::cerr << "Contrainte non respectée : couverture du terrain insuffisante." << std::endl;
-        return false;
-    }
-
-    // Vérification de la capacité des passerelles
-    for (const auto& gateway : gateways) {
-        int connectedNodes = 0;
-        for (const auto& node : nodes) {
-            double distance = calculateDistance(node.x, node.y, gateway.x, gateway.y);
-            if (distance <= gateway.rayon) { // Exemple : rayon de couverture d'une passerelle
-                connectedNodes++;
-            }
-        }
-        if (connectedNodes > gateway.capacity) {
-            std::cerr << "Contrainte non respectée : capacité de la passerelle dépassée." << std::endl;
-            return false;
-        }
-    }
-
-    return true;
-}
-
-void writeNodePositionsToFile(const std::vector<Node>& nodes, const std::string& filename) {
-    std::ofstream file(filename);  // Ouvre le fichier en mode écriture
-    if (!file) {
-        std::cerr << "Erreur d'ouverture du fichier !" << std::endl;
-        return;
-    }
-
-    // Écrire les positions des nœuds dans le fichier avec le format spécifié
     for (size_t i = 0; i < nodes.size(); ++i) {
         file << "**.loRaNodes[" << i << "].**.initialX = " << nodes[i].x << "m" << std::endl;
         file << "**.loRaNodes[" << i << "].**.initialY = " << nodes[i].y << "m" << std::endl;
     }
 
-    file.close();  // Fermer le fichier
+    file.close();
+    std::cout << "Nodes saved to " << filename << "\n";
 }
 
-void writeGatewayPositionsToFile(const std::vector<Gateway>& gateways, const std::string& filename) {
-    std::ofstream file(filename);  // Ouvre le fichier en mode écriture
-    if (!file) {
-        std::cerr << "Erreur d'ouverture du fichier !" << std::endl;
+// Fonction pour écrire les gateways dans un fichier
+void saveGatewaysToFile(const std::vector<Gateway>& centroids, const std::string& filename1) {
+    std::ofstream file(filename1);
+    if (!file.is_open()) {
+        std::cerr << "Error: Unable to open file " << filename1 << "\n";
         return;
     }
 
-    // Écrire les positions des nœuds dans le fichier avec le format spécifié
-    for (size_t i = 0; i < gateways.size(); ++i) {
-        file << "**.loRaGW[" << i << "].**.initialX = " << gateways[i].x << "m" << std::endl;
-        file << "**.loRaGW[" << i << "].**.initialY = " << gateways[i].y << "m" << std::endl;
+    for (size_t i = 0; i < centroids.size(); ++i) {
+        file << "**.loRaGW[" << i << "].**.initialX = " << centroids[i].x << "m" << std::endl;
+        file << "**.loRaGW[" << i << "].**.initialY = " << centroids[i].y << "m" << std::endl;
     }
 
-    file.close();  // Fermer le fichier
+    file.close();
+    std::cout << "Gateways saved to " << filename1 << "\n";
+}
+// Fonction pour initialiser les centroïdes avec KMeans++
+std::vector<Gateway> kMeansPlusPlus(const std::vector<Node>& nodes, int clusterCount) {
+    std::vector<Gateway> centroids;
+    srand(time(0));
+
+    // Choisir le premier centroïde aléatoirement
+    centroids.push_back({nodes[rand() % nodes.size()].x, nodes[rand() % nodes.size()].y, capacity, energy, rayon});
+
+    // Choisir les centroïdes suivants
+    for (int i = 1; i < clusterCount; ++i) {
+        std::vector<double> distances(nodes.size(), std::numeric_limits<double>::max());
+
+        // Calculer la distance de chaque nœud au centroïde le plus proche
+        for (size_t j = 0; j < nodes.size(); ++j) {
+            for (const auto& centroid : centroids) {
+                double dist = calculateDistance(nodes[j], {centroid.x, centroid.y});
+                if (dist < distances[j]) {
+                    distances[j] = dist;
+                }
+            }
+        }
+
+        // Choisir le prochain centroïde avec une probabilité proportionnelle à la distance au carré
+        double totalDistance = std::accumulate(distances.begin(), distances.end(), 0.0);
+        double randomValue = static_cast<double>(rand()) / RAND_MAX * totalDistance;
+        double cumulativeDistance = 0.0;
+        for (size_t j = 0; j < nodes.size(); ++j) {
+                    cumulativeDistance += distances[j];
+                    if (cumulativeDistance >= randomValue) {
+                              centroids.push_back({nodes[j].x, nodes[j].y, capacity, energy, rayon});
+                              break;
+                          }
+                      }
+                  }
+
+                  return centroids;
+                  }
+
+// Fonction pour calculer WCSS (Within-Cluster Sum of Squares)
+double calculateWCSS(const std::vector<Node>& nodes, const std::vector<Gateway>& centroids, const std::vector<int>& assignments) {
+    double wcss = 0.0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        int cluster = assignments[i];
+        double dist = calculateDistance(nodes[i], {centroids[cluster].x, centroids[cluster].y});
+        wcss += dist * dist;
+    }
+    return wcss;
+}
+// Fonction KMeans pour trouver les centroïdes des clusters
+std::pair<std::vector<Gateway>, std::vector<int>> kMeans(const std::vector<Node>& nodes, int clusterCount, int iterations = 100) {
+    // Initialisation des centroïdes avec KMeans++
+    std::vector<Gateway> centroids = kMeansPlusPlus(nodes, clusterCount);
+    std::vector<int> assignments(nodes.size(), -1); // Initialiser à -1 pour détecter les erreurs
+
+    for (int iter = 0; iter < iterations; ++iter) {
+        // Attribution des nœuds aux centroïdes
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            double minDist = std::numeric_limits<double>::max();
+            int bestCluster = -1;
+
+            for (int j = 0; j < clusterCount; ++j) {
+                double dist = calculateDistance(nodes[i], {centroids[j].x, centroids[j].y});
+                if (dist < minDist) {
+                    minDist = dist;
+                    bestCluster = j;
+                }
+            }
+
+            if (bestCluster == -1) {
+                std::cerr << "Erreur : Aucun cluster trouvé pour le nœud " << i << "\n";
+            } else {
+                assignments[i] = bestCluster;
+            }
+        }
+
+        // Mise à jour des centroïdes
+        std::vector<Gateway> newCentroids(clusterCount, {0, 0, capacity, energy, rayon});
+        std::vector<int> counts(clusterCount, 0);
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            int cluster = assignments[i];
+            if (cluster < 0 || cluster >= clusterCount) {
+                std::cerr << "Erreur : Cluster invalide pour le nœud " << i << "\n";
+                continue;
+            }
+            newCentroids[cluster].x += nodes[i].x;
+            newCentroids[cluster].y += nodes[i].y;
+            counts[cluster]++;
+        }
+        for (int j = 0; j < clusterCount; ++j) {
+            if (counts[j] > 0) {
+                newCentroids[j].x /= counts[j];
+                newCentroids[j].y /= counts[j];
+            }
+        }
+        centroids = newCentroids;
+    }
+
+    return {centroids, assignments};
+}
+// Fonction pour exécuter K-means et calculer WCSS pour différentes valeurs de k
+std::vector<double> elbowMethod(const std::vector<Node>& nodes, int maxClusters) {
+    std::vector<double> wcssValues;
+    for (int k = 1; k <= maxClusters; ++k) {
+        // Exécuter K-means pour k clusters
+        auto [centroids, assignments] = kMeans(nodes, k);
+
+        // Calculer WCSS
+        double wcss = calculateWCSS(nodes, centroids, assignments);
+        wcssValues.push_back(wcss);
+
+        std::cout << "k = " << k << ", WCSS = " << wcss << "\n";
+    }
+    return wcssValues;
+}
+// Fonction pour trouver le nombre optimal de clusters
+int findOptimalClusters(const std::vector<double>& wcssValues) {
+    if (wcssValues.size() < 2) {
+        std::cerr << "Erreur : Le vecteur WCSS doit contenir au moins 2 valeurs.\n";
+        return -1;
+    }
+
+    // Calculer les différences de WCSS (pentes)
+    std::vector<double> slopes;
+    for (size_t i = 1; i < wcssValues.size(); ++i) {
+        slopes.push_back(wcssValues[i - 1] - wcssValues[i]);
+    }
+
+    // Calculer les différences de pentes (dérivée seconde)
+    std::vector<double> slopeDifferences;
+    for (size_t i = 1; i < slopes.size(); ++i) {
+        slopeDifferences.push_back(std::abs(slopes[i - 1] - slopes[i]));
+    }
+
+    // Trouver l'indice du coude (point où la dérivée seconde est maximale)
+    auto maxDiffIt = std::max_element(slopeDifferences.begin(), slopeDifferences.end());
+    size_t elbowIndex = std::distance(slopeDifferences.begin(), maxDiffIt) + 1; // +1 car on commence à k=2
+
+    // Retourner le nombre optimal de clusters
+    return static_cast<int>(elbowIndex + 1); // +1 car les clusters commencent à k=1
+}
+// Fonction pour tracer la courbe du coude (à implémenter selon votre environnement)
+void plotElbowCurve(const std::vector<double>& wcssValues) {
+    // Vous pouvez exporter les données vers un fichier et utiliser un outil externe (Python, Excel, etc.) pour tracer la courbe.
+    std::ofstream file("wcss_values.txt");
+    if (file.is_open()) {
+        for (size_t i = 0; i < wcssValues.size(); ++i) {
+            file << i + 1 << " " << wcssValues[i] << "\n";
+        }
+        file.close();
+        std::cout << "WCSS values saved to wcss_values.txt\n";
+    } else {
+        std::cerr << "Error: Unable to open file wcss_values.txt\n";
+    }
+}
+
+// Vérifie si une passerelle est bloquée par un obstacle
+bool isBlockedByObstacle(const Gateway& gateway, const std::vector<Obstacle>& obstacles, double thresholdDistance) {
+    for (const auto& obstacle : obstacles) {
+        if (calculateDistance1(gateway.x, gateway.y, obstacle.x, obstacle.y) < thresholdDistance) {
+            return true; // La passerelle est bloquée par cet obstacle
+        }
+    }
+    return false;
+}
+
+// Repositionne une passerelle si elle est bloquée
+void repositionGateway(Gateway& gateway, const std::vector<Obstacle>& obstacles, double thresholdDistance) {
+    while (isBlockedByObstacle(gateway, obstacles, thresholdDistance)) {
+        gateway.x = static_cast<double>(rand() % 100); // Nouvelle position aléatoire (exemple)
+        gateway.y = static_cast<double>(rand() % 100);
+    }
+}
+
+// Fonction pour regrouper les nœuds par cluster
+std::vector<std::vector<Node>> groupNodesByCluster(const std::vector<Node>& nodes, const std::vector<int>& assignments, int clusterCount) {
+    std::vector<std::vector<Node>> clusters(clusterCount);
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        if (assignments[i] < 0 || assignments[i] >= clusterCount) {
+            std::cerr << "Erreur : Valeur invalide dans assignments : " << assignments[i] << "\n";
+            continue; // Ignorer cette valeur ou gérer l'erreur
+        }
+        clusters[assignments[i]].push_back(nodes[i]);
+    }
+    return clusters;
+}
+
+// Fonction principale pour repositionner les passerelles si elles sont bloquées
+void repositionGatewaysIfBlocked(std::vector<Gateway>& gateways, const std::vector<Obstacle>& obstacles, double thresholdDistance) {
+    // Initialisation du générateur de nombres aléatoires
+    std::srand(static_cast<unsigned int>(std::time(0)));
+
+    // Afficher les positions initiales des passerelles
+    std::cout << "Positions initiales des passerelles :\n";
+    for (const auto& gateway : gateways) {
+        std::cout << "Gateway: (" << gateway.x << ", " << gateway.y << ")\n";
+    }
+
+    // Parcourir toutes les passerelles
+    for (auto& gateway : gateways) {
+        // Vérifier si la passerelle est bloquée par un obstacle
+        if (isBlockedByObstacle(gateway, obstacles, thresholdDistance)) {
+            // Repositionner la passerelle
+            repositionGateway(gateway, obstacles, thresholdDistance);
+        }
+    }
+
+    // Afficher les nouvelles positions des passerelles
+    std::cout << "Nouvelles positions des passerelles :\n";
+    for (const auto& gateway : gateways) {
+        std::cout << "Gateway: (" << gateway.x << ", " << gateway.y << ")\n";
+    }
+}
+
+// Fonction pour sauvegarder les clusters dans un fichier
+void saveClustersToFile(const std::vector<std::vector<Node>>& clusters, const std::string& filename) {
+    std::ofstream file(filename);
+    if (!file.is_open()) {
+        std::cerr << "Error: Unable to open file " << filename << "\n";
+        return;
+    }
+
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        file << "Cluster " << i + 1 << ":\n";
+        for (const auto& node : clusters[i]) {
+            file << "  Node: (" << node.x << ", " << node.y << ")\n";
+        }
+        file << "\n";
+    }
+
+    file.close();
+    std::cout << "Clusters saved to " << filename << "\n";
+}
+
+// Fonction pour afficher les clusters
+void printClusters(const std::vector<std::vector<Node>>& clusters) {
+    for (size_t i = 0; i < clusters.size(); ++i) {
+        std::cout << "Cluster " << i + 1 << ":\n";
+        for (const auto& node : clusters[i]) {
+            std::cout << "  Node: (" << node.x << ", " << node.y << ")\n";
+        }
+        std::cout << std::endl;
+    }
+}
+// Fonction K-means modifiée pour prendre en compte la capacité des passerelles
+std::pair<std::vector<Gateway>, std::vector<int>> constrainedKMeans(const std::vector<Node>& nodes, int clusterCount, int gatewayCapacity, int maxIterations = 100) {
+    std::vector<Gateway> gateways(clusterCount);
+    std::vector<int> assignments(nodes.size(), -1);
+
+    // Initialisation des centroïdes avec K-means++
+    srand(static_cast<unsigned int>(time(0)));
+    gateways[0].x = nodes[rand() % nodes.size()].x;
+    gateways[0].y = nodes[rand() % nodes.size()].y;
+    gateways[0].capacity = gatewayCapacity;
+
+    for (int i = 1; i < clusterCount; ++i) {
+        std::vector<double> distances(nodes.size(), std::numeric_limits<double>::max());
+        for (size_t j = 0; j < nodes.size(); ++j) {
+            for (int k = 0; k < i; ++k) {
+                double dist = calculateDistance(nodes[j], {gateways[k].x, gateways[k].y});
+                if (dist < distances[j]) {
+                    distances[j] = dist;
+                }
+            }
+        }
+        double totalDistance = std::accumulate(distances.begin(), distances.end(), 0.0);
+        double randomValue = static_cast<double>(rand()) / RAND_MAX * totalDistance;
+        double cumulativeDistance = 0.0;
+        for (size_t j = 0; j < nodes.size(); ++j) {
+            cumulativeDistance += distances[j];
+            if (cumulativeDistance >= randomValue) {
+                gateways[i].x = nodes[j].x;
+                gateways[i].y = nodes[j].y;
+                gateways[i].capacity = gatewayCapacity;
+                break;
+            }
+        }
+    }
+
+    // Algorithme K-means
+    for (int iter = 0; iter < maxIterations; ++iter) {
+        // Assignation des nœuds aux clusters
+        for (size_t i = 0; i < nodes.size(); ++i) {
+            double minDist = std::numeric_limits<double>::max();
+            int bestCluster = -1;
+
+            // Trouver le cluster le plus proche avec de la capacité disponible
+            for (int j = 0; j < clusterCount; ++j) {
+                if (gateways[j].assignedNodes.size() < gateways[j].capacity) {
+                    double dist = calculateDistance(nodes[i], {gateways[j].x, gateways[j].y});
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestCluster = j;
+                    }
+                }
+            }
+
+            // Si aucun cluster n'a de capacité disponible, assigner au cluster le plus proche
+            if (bestCluster == -1) {
+                for (int j = 0; j < clusterCount; ++j) {
+                    double dist = calculateDistance(nodes[i], {gateways[j].x, gateways[j].y});
+                    if (dist < minDist) {
+                        minDist = dist;
+                        bestCluster = j;
+                    }
+                }
+            }
+
+            // Assigner le nœud au cluster sélectionné
+            assignments[i] = bestCluster;
+            gateways[bestCluster].assignedNodes.push_back(i);
+        }
+
+        // Mise à jour des centroïdes
+        for (int j = 0; j < clusterCount; ++j) {
+            double sumX = 0.0, sumY = 0.0;
+            int count = gateways[j].assignedNodes.size();
+            for (int nodeIndex : gateways[j].assignedNodes) {
+                sumX += nodes[nodeIndex].x;
+                sumY += nodes[nodeIndex].y;
+            }
+            if (count > 0) {
+                gateways[j].x = sumX / count;
+                gateways[j].y = sumY / count;
+            }
+        }
+
+        // Réinitialiser les nœuds assignés pour la prochaine itération
+        for (auto& gateway : gateways) {
+            gateway.assignedNodes.clear();
+        }
+    }
+
+    return {gateways, assignments};
 }
 int main() {
-
-    std::srand(std::time(0)); // Initialisation du générateur aléatoire
-    // Charger les obstacles depuis un fichier
+    std::string filename = "nodes.txt";
+    std::string filename1 = "gateways.txt";
     std::vector<Obstacle> obstacles;
-        loadObstaclesFromFile("obstacles.txt", obstacles);
-    // Génération des nœuds
-    std::vector<Node> nodes(numNodes);
-    std::vector<Gateway> gateways(numGateways);
-    int assignments[numNodes];
-    // Générer les nœuds aléatoirement
-        for (int i = 0; i < numNodes; i++) {
-            nodes[i].x = rand() % terrainWidth;
-            nodes[i].y = rand() % terrainHeight;
-            nodes[i].isActive = true;
-            nodes[i].rayonN = rayonN;
-        }
-       std::cout << "Nombre de nœuds générés : " << nodes.size() << std::endl;
-       writeNodePositionsToFile(nodes, "nodes.txt");
-       std::cerr << "test" << std::endl;
+    double thresholdDistance = 5.0;
 
-    // Trouver le nombre optimal de clusters (passerelles)
-    int optimalClusters = findOptimalClusters(nodes, numNodes, obstacles);
-    std::cout << "Nombre optimal de passerelles : " << optimalClusters << std::endl;
-
-         // Génération des passerelles
-         for (int i = 0; i < optimalClusters; i++) {
-                 gateways[i].x = rand() % terrainWidth;
-                 gateways[i].y = rand() % terrainHeight;
-                 gateways[i].capacity = capacity;
-                 gateways[i].energy = energy;
-                 gateways[i].rayon = rayon;
-             }
-
-         // Enregistrer les passerelles dans un fichier
-             writeGatewayPositionsToFile(gateways, "gateways.txt");
-    // Vérification des contraintes
-    /*if (!verifyConstraints(nodes, gateways, minDistance, terrainArea)) {
-        std::cerr << "Échec des contraintes. Veuillez ajuster les paramètres." << std::endl;
+    std::ifstream inputFile("obstacles.txt");
+    if (!inputFile) {
+        std::cerr << "Erreur : Impossible de lire le fichier obstacles.txt" << std::endl;
         return 1;
     }
-*/
-    // Calcul des fonctions objectives
-    int fN = calculateObjective_fN(nodes);
-    double fC = calculateObjective_fC(nodes, gateways);
-    double fE = calculateObjective_fE(gateways);
 
-    // Affichage des résultats
-    std::cout << "Fonctions objectives :" << std::endl;
-    std::cout << "f_N (Nombre de nœuds actifs) = " << fN << std::endl;
-    std::cout << "f_C (Distance cumulée) = " << fC << std::endl;
-    std::cout << "f_E (Énergie consommée) = " << fE << std::endl;
+    // Génération des nœuds
+    auto nodes = generateNodes(N, terrainWidth, terrainHeight);
 
+    // Enregistrement des nœuds dans un fichier
+    saveNodesToFile(nodes, filename);
 
+    // Appliquer la méthode du coude pour déterminer le nombre optimal de clusters
+    int maxClusters = 20;
+    std::vector<double> wcssValues = elbowMethod(nodes, maxClusters);
 
+    // Trouver le nombre optimal de clusters
+    int optimalClusters = findOptimalClusters(wcssValues);
+    if (optimalClusters < 1 || optimalClusters > nodes.size()) {
+        std::cerr << "Erreur : Nombre de clusters invalide : " << optimalClusters << "\n";
+        return 1; // Arrêter le programme ou gérer l'erreur
+    }
+    // KMeans clustering avec contrainte de capacité
+    auto [centroids, assignments] = constrainedKMeans(nodes, optimalClusters, capacity);
 
+    // Les centroïdes sont les gateways
+    std::vector<Gateway> gateways = centroids;
+    std::cout << "Nombre de passerelles (centroïdes) : " << centroids.size() << "\n";
 
-      return 0;
+    // Groupement des nœuds par cluster
+    auto clusters = groupNodesByCluster(nodes, assignments, optimalClusters);
+
+    // Repositionner les passerelles si elles sont bloquées
+    repositionGatewaysIfBlocked(centroids, obstacles, thresholdDistance);
+
+    // Affichage des centroïdes
+    std::cout << "Positions optimales des passerelles (centroïdes) :\n";
+    for (const auto& centroid : centroids) {
+        std::cout << "x: " << centroid.x << ", y: " << centroid.y << "\n";
+    }
+
+    // Enregistrement des passerelles dans un fichier
+    saveGatewaysToFile(centroids, filename1);
+
+    // Affichage et sauvegarde des clusters
+    printClusters(clusters);
+    saveClustersToFile(clusters, "clusters.txt");
+
+    // Vérification des contraintes
+    bool allConstraintsSatisfied = true;
+
+    // Vérifier chaque contrainte individuellement
+    if (!constraint1(Y)) {
+        std::cout << "Contrainte 1 non satisfaite : Chaque nœud doit être servi par au moins une passerelle.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    if (!constraint2(Y, X)) {
+        std::cout << "Contrainte 2 non satisfaite : Une passerelle ne peut servir un nœud que si elle est activée.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    if (!constraint3(Y, C_r)) {
+        std::cout << "Contrainte 3 non satisfaite : La capacité de chaque passerelle ne doit pas être dépassée.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    if (!constraint4(X, E_r)) {
+        std::cout << "Contrainte 4 non satisfaite : L'énergie totale consommée ne doit pas dépasser E_total.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    if (!constraint5(Z, S_n)) {
+        std::cout << "Contrainte 5 non satisfaite : La surface couverte par les nœuds doit être au moins égale à S_terrain.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    if (!constraint6(nodes, D_min)) {
+        std::cout << "Contrainte 6 non satisfaite : La distance minimale entre deux nœuds doit être respectée.\n";
+        allConstraintsSatisfied = false;
+    }
+
+    // Afficher un message global
+    if (allConstraintsSatisfied) {
+        std::cout << "Toutes les contraintes sont satisfaites.\n";
+    } else {
+        std::cout << "Certaines contraintes ne sont pas satisfaites.\n";
+    }
+
+    return 0;
 }

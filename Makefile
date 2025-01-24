@@ -2,7 +2,7 @@
 # OMNeT++/OMNEST Makefile for Test1-master
 #
 # This file was generated with the command:
-#  opp_makemake -f --deep -O out -KFLORA_PROJ=../flora -KINET4_4_PROJ=../inet4.4 -DINET_IMPORT -I. -I$$\(FLORA_PROJ\)/src -I$$\(INET4_4_PROJ\)/src -L$$\(FLORA_PROJ\)/src -L$$\(INET4_4_PROJ\)/src -lflora$$\(D\) -lINET$$\(D\)
+#  opp_makemake -f --deep -O out -KFLORA_PROJ=../../flora -KINET4_4_PROJ=../../inet4.4 -DINET_IMPORT -I. -I$$\(FLORA_PROJ\)/src -I$$\(INET4_4_PROJ\)/src -L$$\(FLORA_PROJ\)/src -L$$\(INET4_4_PROJ\)/src -lflora$$\(D\) -lINET$$\(D\)
 #
 
 # Name of target to be created (-o option)
@@ -42,8 +42,8 @@ MSGFILES =
 SMFILES =
 
 # Other makefile variables (-K)
-FLORA_PROJ=../flora
-INET4_4_PROJ=../inet4.4
+FLORA_PROJ=../../flora
+INET4_4_PROJ=../../inet4.4
 
 #------------------------------------------------------------------------------
 

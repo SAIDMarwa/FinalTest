@@ -5,20 +5,11 @@
 
 using namespace omnetpp;
 
-namespace LoRaWANNetwork {
+class LoRaWANNetwork : public cSimpleModule {
+  protected:
 
-class LoRaWANNetwork : public cSimpleModule
-{
-public:
-    virtual ~LoRaWANNetwork() {}
-
-protected:
-
+    int main();
     virtual void initialize() override;
-     int main();
-
 };
-
-}
 
 #endif /* LORAWANNETWORK_H_ */
