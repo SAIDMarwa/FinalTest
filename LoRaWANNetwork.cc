@@ -12,16 +12,20 @@
 #include <string>
 #include <limits>
 #include <omnetpp.h>
+#include <chrono>
+
+#define NOISE_POWER -100.0  // Puissance du bruit en dBm
+#define PACKET_LOSS_THRESHOLD -10.0  // Seuil de perte de paquets en dB
 int clusterCount = 20;  // Nombre de clusters ou de passerelles à placer
-const int terrainWidth = 1000;  // Largeur du terrain en mètres
-const int terrainHeight = 1000;  // Hauteur du terrain en mètres
-const int N = 300;  // Nombre total de nœuds
-const double D_min = 10.0;  // Distance minimale entre deux nœuds en mètres
+const int terrainWidth = 200000;  // Largeur du terrain en mètres
+const int terrainHeight = 200000;  // Hauteur du terrain en mètres
+const int N = 100;  // Nombre total de nœuds
+const double D_min = 2000;  // Distance minimale entre deux nœuds en mètres
 const double E_total = 1000.0;  // Énergie totale admissible (par exemple en mAh)
 const double S_terrain = terrainWidth * terrainHeight;  // Surface totale du terrain (en m²)
-const int capacity = 20;  // Capacité d'une passerelle en nombre de nœuds gérés
+const int capacity = 10;  // Capacité d'une passerelle en nombre de nœuds gérés
 const double energy = 15.0;  // Consommation d'énergie d'une passerelle (en watts)
-const int rayon = 200;  // Rayon de couverture des gateways (en mètres)
+const int rayon = 200000;  // Rayon de couverture des gateways (en mètres)
 
 
 // Définition des variables de décision
@@ -177,6 +181,7 @@ void saveNodesToFile(const std::vector<Node>& nodes, const std::string& filename
     for (size_t i = 0; i < nodes.size(); ++i) {
         file << "**.loRaNodes[" << i << "].**.initialX = " << nodes[i].x << "m" << std::endl;
         file << "**.loRaNodes[" << i << "].**.initialY = " << nodes[i].y << "m" << std::endl;
+       //file <<"["<< nodes[i].x <<","<< nodes[i].y<<"]," << std::endl;
     }
 
     file.close();
@@ -194,6 +199,7 @@ void saveGatewaysToFile(const std::vector<Gateway>& centroids, const std::string
     for (size_t i = 0; i < centroids.size(); ++i) {
         file << "**.loRaGW[" << i << "].**.initialX = " << centroids[i].x << "m" << std::endl;
         file << "**.loRaGW[" << i << "].**.initialY = " << centroids[i].y << "m" << std::endl;
+       // file <<"["<< centroids[i].x <<","<< centroids[i].y<<"]," << std::endl;
     }
 
     file.close();
@@ -533,6 +539,80 @@ std::pair<std::vector<Gateway>, std::vector<int>> constrainedKMeans(const std::v
 
     return {gateways, assignments};
 }
+
+// Modèle de path loss logarithmique pour calculer le RSSI (en dBm)
+double calculateRSSI(const Node& node, const Gateway& gateway) {
+    double distance = calculateDistance1(node.x, node.y, gateway.x, gateway.y);
+    double tx_power = 14.0;  // Puissance d'émission en dBm
+    double path_loss_exponent = 2.9;  // Typique pour LoRa en environnement urbain
+    double reference_distance = 1.0;  // Référence en mètres
+    double path_loss_db = 0.0;
+
+    if (distance < 1.0) distance = 1.0;  // Éviter log(0)
+
+    path_loss_db = 10 * path_loss_exponent * log10(distance / reference_distance);
+    return tx_power - path_loss_db;
+}
+
+// Calcul du SNR (Signal-to-Noise Ratio) en dB
+double calculateSNR(double rssi) {
+    return rssi - NOISE_POWER;
+}
+
+// Vérifier si un paquet est perdu en fonction du SNR
+bool isPacketLost(double snr) {
+    return snr < PACKET_LOSS_THRESHOLD;
+}
+
+// Calculer le pourcentage de paquets perdus dans le réseau
+double calculatePacketLossRate(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways) {
+    int total_packets = nodes.size();
+    int lost_packets = 0;
+
+    for (const auto& node : nodes) {
+        bool received = false;
+        for (const auto& gateway : gateways) {
+            double rssi = calculateRSSI(node, gateway);
+            double snr = calculateSNR(rssi);
+
+            if (!isPacketLost(snr)) {
+                received = true;
+                break;
+            }
+        }
+
+        if (!received) {
+            lost_packets++;
+        }
+    }
+
+    return (static_cast<double>(lost_packets) / total_packets) * 100;
+}
+
+
+// Fonction pour calculer le GCR
+double calculateGCR(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways, double rssiThreshold, const std::vector<int>& assignments) {
+    int connectedNodes = 0;
+    for (size_t i = 0; i < nodes.size(); ++i) { // Utilisez un itérateur pour accéder aux éléments
+        int cluster = assignments[i];
+        double rssi = calculateRSSI(nodes[i], gateways[cluster]);
+        if (rssi > rssiThreshold) {
+            connectedNodes++;
+        }
+    }
+    return (static_cast<double>(connectedNodes) / nodes.size()) * 100;
+}
+
+// Fonction pour calculer la distance moyenne
+double calculateAverageDistance(const std::vector<Node>& nodes, const std::vector<Gateway>& gateways, const std::vector<int>& assignments) {
+    double totalDistance = 0.0;
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        int cluster = assignments[i];
+        totalDistance += calculateDistance(nodes[i], {gateways[cluster].x, gateways[cluster].y});
+    }
+    return totalDistance / nodes.size();
+}
+
 int main() {
     std::string filename = "nodes.txt";
     std::string filename1 = "gateways.txt";
@@ -556,7 +636,8 @@ int main() {
     std::vector<double> wcssValues = elbowMethod(nodes, maxClusters);
 
     // Trouver le nombre optimal de clusters
-    int optimalClusters = findOptimalClusters(wcssValues);
+     //int optimalClusters = findOptimalClusters(wcssValues);
+    int optimalClusters =10;
     if (optimalClusters < 1 || optimalClusters > nodes.size()) {
         std::cerr << "Erreur : Nombre de clusters invalide : " << optimalClusters << "\n";
         return 1; // Arrêter le programme ou gérer l'erreur
@@ -627,6 +708,38 @@ int main() {
     } else {
         std::cout << "Certaines contraintes ne sont pas satisfaites.\n";
     }
+    // Calcul du taux de perte de paquets
+      double packet_loss_rate = calculatePacketLossRate(nodes, centroids);
 
+      for (const auto& node : nodes) {
+          for (const auto& gateway : gateways) {
+              double rssi = calculateRSSI(node, gateway);
+              double snr = calculateSNR(rssi);
+              bool lost = isPacketLost(snr);
+
+              std::cout << "Node: (" << node.x << ", " << node.y << ") -> Gateway: (" << gateway.x << ", " << gateway.y << ")\n";
+              std::cout << "  Distance: " << calculateDistance1(node.x, node.y, gateway.x, gateway.y) << " m\n";
+              std::cout << "  RSSI: " << rssi << " dBm\n";
+              std::cout << "  SNR: " << snr << " dB\n";
+              std::cout << "  Packet Lost: " << (lost ? "Yes" : "No") << "\n";
+          }
+      }
+      // Mesurer le temps d'exécution
+        auto start = std::chrono::high_resolution_clock::now();
+
+        // ... (exécution de l'algorithme) ...
+
+        auto end = std::chrono::high_resolution_clock::now();
+        double elapsed_seconds = std::chrono::duration_cast<std::chrono::duration<double>>(end - start).count();
+
+        // Calcul des métriques
+        double gcr = calculateGCR(nodes, gateways, -90.0,assignments); // Exemple de seuil RSSI
+        double avgDistance = calculateAverageDistance(nodes, gateways, assignments);
+
+        // Affichage des résultats
+        std::cout << "GCR: " << gcr << "%" << std::endl;
+        std::cout << "Distance moyenne: " << avgDistance << " m" << std::endl;
+        std::cout << "WCSS: " << wcssValues.back() << std::endl; // WCSS déjà calculé
+        std::cout << "Temps d'exécution: " << elapsed_seconds << " s" << std::endl;
     return 0;
 }
